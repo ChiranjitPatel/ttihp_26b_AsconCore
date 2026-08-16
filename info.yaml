@@ -44,16 +44,14 @@ pinout:
   uo[7]: "data_out[7]"
 
   # Bidirectional pins
-  uio_in[0]: "load_byte"
-  uio_in[1]: "shift_out"
-  uio_in[2]: "round_sel[0]"
-  uio_in[3]: "round_sel[1]"
-  uio_in[4]: "start"
-  uio_in[5]: "rst_rdptr"
-  uio_in[6]: ""
-  uio_in[7]: ""
-  uio_out[0]: "busy"
-  uio_out[1]: "done"
+  uio[0]: "load_byte"
+  uio[1]: "shift_out"
+  uio[2]: "round_sel[0]"
+  uio[3]: "round_sel[1]"
+  uio[4]: "start"
+  uio[5]: "rst_rdptr"
+  uio[6]: ""
+  uio[7]: ""
   
   
 # Do not change!
