@@ -7,11 +7,11 @@ hash function (NIST SP 800-232).
 ## What's implemented
 
 The 320-bit Ascon permutation state (five 64-bit words `x0..x4`) is stored
-in a single register. Each round is split into an **8-bit-lane-serial
-S-box phase** (8 cycles, reusing one small S-box instance across all 64
-bit positions of each word — the S-box has no dependency between bit
+in a single register. Each round is split into a **bit-serial S-box phase**
+(64 cycles, reusing one 1-bit-wide S-box instance across all 64 bit
+positions of each word — the S-box has no dependency between bit
 positions, so this is bit-for-bit equivalent to computing it in one shot)
-followed by **one full-width diffusion cycle**, for 9 cycles per round.
+followed by **one full-width diffusion cycle**, for 65 cycles per round.
 This trades a bit of permutation latency (12 rounds = 108 cycles for
 `p^12`, still small next to the I/O time below) to avoid paying tile area
 for 64 bits' worth of S-box logic running in parallel. The host I/O is
@@ -54,7 +54,7 @@ Usage:
    byte of `x0` first, down to the least-significant byte of `x4` last
    (matches the spec's `State = x0 || x1 || x2 || x3 || x4` layout).
 2. Set `round_sel`, pulse `start` for 1 cycle.
-3. Wait for `busy` to fall (9 cycles per round — 8 S-box lanes + 1
+3. Wait for `busy` to fall (65 cycles per round — 64 S-box lanes + 1
    diffusion cycle — times 12, 8, 6, or 1 rounds after `start`).
 4. Pulse `shift_out` 40 times, reading `uo_out` each time, to read the
    result out in the same byte order. The read pointer auto-resets after
@@ -82,8 +82,9 @@ No multiplier and no memory array beyond the 320-bit state register and a
 S-box (all 320 bits' worth of the substitution layer built once) was
 initially the single largest contributor to area — comparable to or larger
 than the 320-bit state register itself. `ascon_round.v` now provides the
-S-box as a narrow, reusable `ascon_sbox_slice` (8 bits wide by default) that
-`project.v` drives across 8 lanes per round instead of instantiating the
-full 64-bit-wide version once; see [`knowledge.md`](../knowledge.md) at the
-repo root for the full area analysis and the diffusion-serialization
+S-box as a narrow, reusable `ascon_sbox_slice` (currently instantiated
+1 bit wide) that `project.v` drives across 64 lanes per round instead of
+instantiating the full 64-bit-wide version once; see
+[`knowledge.md`](../knowledge.md) at the repo root for the full area
+analysis, the real hardening-run results, and the diffusion-serialization
 follow-up (not yet needed/implemented) if more area has to come out.

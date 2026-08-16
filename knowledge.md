@@ -94,25 +94,54 @@ check the actual cell count / die area from the project's `gds.yaml` GitHub
 Actions run (Actions tab on the repo, or the OpenLane `reports/` area summary it
 produces) rather than trusting the estimates here.
 
+## Ground truth from the real hardening flow (corrects the estimates above)
+
+Phase A (8-bit S-box lanes) was pushed and hardened against a `1x2` (2-tile)
+target. Result from `gds.yaml`:
+
+```
+[GPL-0301] Utilization 113.671 % exceeds 100%.
+```
+
+i.e. still ~14% too much cell area to even place (let alone route) at 2
+tiles, despite Phase A's 8x S-box reduction. This means the hand-estimated
+GE counts above materially *understated* how much the fully-parallel S-box
+was costing relative to the register — real standard-cell area clearly
+didn't shrink as cleanly as the naive "2-input-gate-equivalent" model
+predicted. Treat the GE table above as directionally useful (S-box+diffusion
+> register) but not quantitatively reliable; only the CI area/utilization
+numbers are ground truth from here on.
+
 ## Status
 
-**Phase A implemented** (this environment has no local iverilog/cocotb, so
-verification here was a bit-accurate Python re-implementation of the new FSM
-— `state_flat` layout, lane offsets, in-place lane updates, round-constant
-gating — cross-checked against 88 random/fixed vectors across all round
-counts; 88/88 matched the reference. The real cocotb suite in `test/test.py`
-should still be run via the project's CI (`test.yaml`) to confirm — it
-already polls `busy` in a loop rather than assuming a fixed cycle count, so
-it needed no changes for the new 9-cycles/round timing).
+**Phase A2 implemented**: pushed the S-box lane width from 8 bits down to
+1 bit (fully bit-serial S-box, `ascon_sbox_slice #(.WIDTH(1))`), same
+mechanical in-place-update technique as Phase A, just narrower and looping
+64 times instead of 8. No new registers added. Round latency: 64 (S-box
+lanes) + 1 (diffusion) = 65 cycles/round (was 9); a `p^12` permutation is
+now 780 cycles, still trivial against a 10 MHz clock and the ~80-cycle I/O
+overhead. Verified via the same bit-accurate Python FSM model (generalized
+to arbitrary lane width) against 176 vectors across widths {1, 8} and all
+round counts (12/8/6/1) — 176/176 matched. No local iverilog/cocotb in this
+environment, so the real `test/test.py` suite still needs to run in CI to
+confirm (unchanged from before — it polls `busy` rather than assuming a
+fixed cycle count, so no test changes are needed for the new timing).
 
-What changed:
-- `src/ascon_round.v`: replaced the single fully-parallel `ascon_round`
-  module with `ascon_sbox_slice #(WIDTH=8)` (S-box only, reusable at any
-  width) and `ascon_diffusion` (full-width linear layer, unchanged math).
-- `src/project.v`: FSM gained a `DIFF` state; `RUN` became `SBOX` (loops 8
-  times, one 8-bit lane per cycle, updating `state_flat` in place) followed
-  by one `DIFF` cycle per round. `busy` is now `fsm_state != IDLE`.
+**Not yet known**: whether width=1 alone closes the 13.67% gap. If the next
+`gds.yaml` run still fails utilization, the next-cheapest lever is Phase B
+(serializing diffusion) — but the mux-based design explored for it only
+saves ~20% of the diffusion block's ~650 GE at large complexity/cycle cost
+(see the analysis kept below), so if width=1 isn't enough on its own,
+strongly consider re-measuring actual GE-per-block from the OpenLane area
+report first (real numbers, not hand estimates) before investing more
+engineering effort in diffusion, and weigh whether accepting 3 tiles is a
+better tradeoff than an increasingly complex/fragile datapath.
 
-Not yet done: Phase B (serializing diffusion too). Only take this on if the
-actual CI area report after Phase A still doesn't fit 2 tiles — check
-`gds.yaml`'s run output / OpenLane area report before deciding.
+What changed since Phase A:
+- `src/project.v`: `lane_idx` widened 3→6 bits (0..63), `lane_off` is now
+  `lane_idx` directly (no `{lane_idx,3'b000}` byte-shift), S-box slice
+  wires narrowed to 1 bit, round-constant gating generalized from
+  "`lane_off==0`, XOR whole byte" to "`lane_off<8`, XOR the matching rc bit".
+  `ascon_sbox_slice` instantiated with `.WIDTH(1)`.
+- `src/ascon_round.v`: unchanged from Phase A (already parameterized by
+  `WIDTH`, so no edits needed to shrink further).

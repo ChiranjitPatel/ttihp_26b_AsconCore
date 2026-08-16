@@ -14,11 +14,11 @@ building block of Ascon, the NIST-standardized lightweight AEAD cipher and
 hash function (NIST SP 800-232).
 
 The 320-bit Ascon permutation state (five 64-bit words `x0..x4`) is stored
-in a single register. Each round is split into an **8-bit-lane-serial
-S-box phase** (8 cycles, reusing one small S-box instance across all 64
-bit positions of each word — the S-box has no dependency between bit
+in a single register. Each round is split into a **bit-serial S-box phase**
+(64 cycles, reusing one 1-bit-wide S-box instance across all 64 bit
+positions of each word — the S-box has no dependency between bit
 positions, so this is bit-for-bit equivalent to computing it in one shot)
-followed by **one full-width diffusion cycle**, for 9 cycles per round.
+followed by **one full-width diffusion cycle**, for 65 cycles per round.
 This trades a bit of permutation latency for tile area versus computing
 the whole 320-bit-wide S-box in parallel. The host I/O is also serialized,
 since TinyTapeout gives us just 8 dedicated inputs, 8 dedicated outputs,
@@ -61,7 +61,7 @@ Usage:
    byte of `x0` first, down to the least-significant byte of `x4` last
    (matches the spec's `State = x0 || x1 || x2 || x3 || x4` layout).
 2. Set `round_sel`, pulse `start` for 1 cycle.
-3. Wait for `busy` to fall (9 cycles per round — 8 S-box lanes + 1
+3. Wait for `busy` to fall (65 cycles per round — 64 S-box lanes + 1
    diffusion cycle — times 12, 8, 6, or 1 rounds after `start`).
 4. Pulse `shift_out` 40 times, reading `uo_out` each time, to read the
    result out in the same byte order. The read pointer auto-resets after

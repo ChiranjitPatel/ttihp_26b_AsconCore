@@ -6,15 +6,16 @@
 // A byte-serial wrapper around the 320-bit Ascon permutation (p^12 / p^8 /
 // p^6, plus a single-round debug mode), sized for a TinyTapeout tile.
 //
-// Each round is split into an 8-bit-lane-serial S-box phase (8 cycles,
-// reusing one 8-bit-wide instance of the S-box logic across all 64 bit
-// positions of each word) followed by one full-width diffusion phase. The
-// S-box has no dependency between bit positions, so lane-serializing it is
-// bit-for-bit equivalent to the fully parallel version; only the diffusion
-// layer needs a full word at once. This trades permutation latency (12
-// rounds x 9 cycles/round = 108 cycles for p^12, still small next to the
-// I/O time below) for roughly an 8x smaller S-box, which was the largest
-// single contributor to tile area.
+// Each round is split into a bit-serial S-box phase (64 cycles, reusing one
+// 1-bit-wide instance of the S-box logic across all 64 bit positions of
+// each word) followed by one full-width diffusion phase. The S-box has no
+// dependency between bit positions, so bit-serializing it is bit-for-bit
+// equivalent to the fully parallel version; only the diffusion layer needs
+// a full word at once. This trades permutation latency (12 rounds x 65
+// cycles/round = 780 cycles for p^12, still small next to the I/O time
+// below) for a much smaller S-box, which was the largest single
+// contributor to tile area. (An earlier 8-bit-lane version wasn't enough
+// on its own to fit a 1x2 tile footprint — see knowledge.md.)
 //
 // ---------------------------------------------------------------------------
 // Host protocol (all control bits live on uio_in / uio_out)
@@ -44,7 +45,7 @@
 //      least-significant byte of x4 last (big-endian, matches the Ascon
 //      spec's word layout State = x0 || x1 || x2 || x3 || x4).
 //   2. Set round_sel, pulse start for 1 cycle.
-//   3. Wait for busy to fall / done to pulse (9 clock cycles per round: 8
+//   3. Wait for busy to fall / done to pulse (65 clock cycles per round: 64
 //      S-box lanes + 1 diffusion cycle, x 12/8/6/1 rounds depending on
 //      round_sel).
 //   4. Pulse shift_out 40 times, reading uo_out after each pulse, to shift
@@ -99,14 +100,14 @@ module tt_um_ascon_permutation (
 
     // ---- FSM ----
     localparam IDLE = 2'd0;
-    localparam SBOX = 2'd1;  // lane-serial S-box: 8 cycles, 8 bits/word/cycle
+    localparam SBOX = 2'd1;  // bit-serial S-box: 64 cycles, 1 bit/word/cycle
     localparam DIFF = 2'd2;  // one full-width diffusion cycle
 
     reg [1:0] fsm_state;
     reg [3:0] r_idx;        // index into round-constant table, 0..11
     reg [3:0] rounds_left;  // rounds remaining in current run
     reg       done_pulse;
-    reg [2:0] lane_idx;     // which 8-bit lane (0..7) of the current round's S-box
+    reg [5:0] lane_idx;     // which bit lane (0..63) of the current round's S-box
 
     // ---- word views of the state register ----
     wire [63:0] x0_cur = state_flat[319:256];
@@ -115,19 +116,21 @@ module tt_um_ascon_permutation (
     wire [63:0] x3_cur = state_flat[127:64];
     wire [63:0] x4_cur = state_flat[63:0];
 
-    // ---- S-box: one 8-bit lane at a time, reused across the round ----
-    wire [5:0] lane_off = {lane_idx, 3'b000};  // 0, 8, 16, ..., 56
+    // ---- S-box: one bit lane at a time, reused across the round ----
+    wire [5:0] lane_off = lane_idx;  // 0..63
 
-    wire [7:0] c0_slice = x0_cur[lane_off +: 8];
-    wire [7:0] c1_slice = x1_cur[lane_off +: 8];
-    wire [7:0] c2_slice = x2_cur[lane_off +: 8] ^
-                           ((lane_off == 6'd0) ? round_const(r_idx) : 8'd0);
-    wire [7:0] c3_slice = x3_cur[lane_off +: 8];
-    wire [7:0] c4_slice = x4_cur[lane_off +: 8];
+    wire rc_bit = round_const(r_idx)[lane_off[2:0]];
 
-    wire [7:0] y0_slice, y1_slice, y2_slice, y3_slice, y4_slice;
+    wire c0_slice = x0_cur[lane_off];
+    wire c1_slice = x1_cur[lane_off];
+    // round constant only touches byte 0 (bits 7:0) of x2
+    wire c2_slice = x2_cur[lane_off] ^ ((lane_off < 6'd8) ? rc_bit : 1'b0);
+    wire c3_slice = x3_cur[lane_off];
+    wire c4_slice = x4_cur[lane_off];
 
-    ascon_sbox_slice #(.WIDTH(8)) u_sbox_slice (
+    wire y0_slice, y1_slice, y2_slice, y3_slice, y4_slice;
+
+    ascon_sbox_slice #(.WIDTH(1)) u_sbox_slice (
         .c0_i (c0_slice),
         .c1_i (c1_slice),
         .c2_i (c2_slice),
@@ -140,7 +143,7 @@ module tt_um_ascon_permutation (
         .y4_o (y4_slice)
     );
 
-    // ---- diffusion: full width, run once per round after all 8 S-box lanes ----
+    // ---- diffusion: full width, run once per round after all 64 S-box lanes ----
     wire [63:0] x0_nxt, x1_nxt, x2_nxt, x3_nxt, x4_nxt;
 
     ascon_diffusion u_diffusion (
@@ -164,7 +167,7 @@ module tt_um_ascon_permutation (
             r_idx       <= 4'd0;
             rounds_left <= 4'd0;
             done_pulse  <= 1'b0;
-            lane_idx    <= 3'd0;
+            lane_idx    <= 6'd0;
         end else if (ena) begin
             done_pulse <= 1'b0;
 
@@ -191,31 +194,31 @@ module tt_um_ascon_permutation (
                             default: begin r_idx <= 4'd11; rounds_left <= 4'd1; end // debug: 1 round
                         endcase
                         read_cnt  <= 6'd0;
-                        lane_idx  <= 3'd0;
+                        lane_idx  <= 6'd0;
                         fsm_state <= SBOX;
                     end
                 end
 
                 SBOX: begin
                     // in-place update: each lane only ever reads/writes its
-                    // own bit positions, so this is safe to do incrementally
-                    state_flat[256 + lane_off +: 8] <= y0_slice;
-                    state_flat[192 + lane_off +: 8] <= y1_slice;
-                    state_flat[128 + lane_off +: 8] <= y2_slice;
-                    state_flat[64  + lane_off +: 8] <= y3_slice;
-                    state_flat[0   + lane_off +: 8] <= y4_slice;
+                    // own bit position, so this is safe to do incrementally
+                    state_flat[256 + lane_off] <= y0_slice;
+                    state_flat[192 + lane_off] <= y1_slice;
+                    state_flat[128 + lane_off] <= y2_slice;
+                    state_flat[64  + lane_off] <= y3_slice;
+                    state_flat[0   + lane_off] <= y4_slice;
 
-                    if (lane_idx == 3'd7) begin
+                    if (lane_idx == 6'd63) begin
                         fsm_state <= DIFF;
                     end else begin
-                        lane_idx <= lane_idx + 3'd1;
+                        lane_idx <= lane_idx + 6'd1;
                     end
                 end
 
                 DIFF: begin
                     state_flat <= {x0_nxt, x1_nxt, x2_nxt, x3_nxt, x4_nxt};
                     r_idx      <= r_idx + 4'd1;
-                    lane_idx   <= 3'd0;
+                    lane_idx   <= 6'd0;
 
                     if (rounds_left == 4'd1) begin
                         fsm_state  <= IDLE;
