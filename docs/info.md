@@ -14,11 +14,16 @@ building block of Ascon, the NIST-standardized lightweight AEAD cipher and
 hash function (NIST SP 800-232).
 
 The 320-bit Ascon permutation state (five 64-bit words `x0..x4`) is stored
-in a single register and updated **one full round per clock cycle** using
-fully combinational round logic (substitution layer + linear diffusion
-layer). Only the host I/O is serialized, since TinyTapeout gives us just
-8 dedicated inputs, 8 dedicated outputs, and 8 bidirectional pins — nowhere
-near enough for a 320-bit parallel interface.
+in a single register. Each round is split into an **8-bit-lane-serial
+S-box phase** (8 cycles, reusing one small S-box instance across all 64
+bit positions of each word — the S-box has no dependency between bit
+positions, so this is bit-for-bit equivalent to computing it in one shot)
+followed by **one full-width diffusion cycle**, for 9 cycles per round.
+This trades a bit of permutation latency for tile area versus computing
+the whole 320-bit-wide S-box in parallel. The host I/O is also serialized,
+since TinyTapeout gives us just 8 dedicated inputs, 8 dedicated outputs,
+and 8 bidirectional pins — nowhere near enough for a 320-bit parallel
+interface.
 
 Supported permutation variants (selected via `round_sel`):
 | `round_sel` | Rounds | Corresponds to |
@@ -29,8 +34,8 @@ Supported permutation variants (selected via `round_sel`):
 | `11` | 1  | Single-round debug/step mode |
 
 This is a **permutation-only** core (no key/nonce storage, padding, or
-AEAD framing) — it exposes `p^r(state)` as a function. That keeps it small
-enough for a 1x1 tile while still being a genuine, verifiable hardware
+AEAD framing) — it exposes `p^r(state)` as a function. That keeps it as
+small as practical while still being a genuine, verifiable hardware
 implementation of Ascon's core primitive. A full AEAD wrapper is a natural
 follow-up project once this is proven on silicon.
 
@@ -56,7 +61,8 @@ Usage:
    byte of `x0` first, down to the least-significant byte of `x4` last
    (matches the spec's `State = x0 || x1 || x2 || x3 || x4` layout).
 2. Set `round_sel`, pulse `start` for 1 cycle.
-3. Wait for `busy` to fall (12, 8, 6, or 1 cycles after `start`).
+3. Wait for `busy` to fall (9 cycles per round — 8 S-box lanes + 1
+   diffusion cycle — times 12, 8, 6, or 1 rounds after `start`).
 4. Pulse `shift_out` 40 times, reading `uo_out` each time, to read the
    result out in the same byte order. The read pointer auto-resets after
    a run completes, or can be reset manually with `rst_rdptr` to re-read.
