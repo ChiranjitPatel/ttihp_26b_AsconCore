@@ -1,17 +1,10 @@
-<!---
-
-This file is used to generate your project datasheet. Please fill in the information below and delete any unused
-sections.
-
-You can also include images in this folder and reference them in the markdown. Each image must be less than
-512 kb in size, and the combined size of all images must be less than 1 MB.
--->
-
-## How it works
+# Ascon Permutation Core — TinyTapeout IHP26b
 
 A byte-serial hardware implementation of the Ascon permutation — the core
 building block of Ascon, the NIST-standardized lightweight AEAD cipher and
 hash function (NIST SP 800-232).
+
+## What's implemented
 
 The 320-bit Ascon permutation state (five 64-bit words `x0..x4`) is stored
 in a single register and updated **one full round per clock cycle** using
@@ -34,8 +27,7 @@ enough for a 1x1 tile while still being a genuine, verifiable hardware
 implementation of Ascon's core primitive. A full AEAD wrapper is a natural
 follow-up project once this is proven on silicon.
 
-
-## How to test
+## Protocol
 
 All control lives on `uio_in` / `uio_out`; data moves 1 byte at a time on
 `ui_in` / `uo_out`.
@@ -61,6 +53,26 @@ Usage:
    result out in the same byte order. The read pointer auto-resets after
    a run completes, or can be reset manually with `rst_rdptr` to re-read.
 
-## External hardware
+## Verification
 
-List external hardware used in your project (e.g. PMOD, LED display, etc), if any- need to update
+- `src/ascon_round.v` was checked bit-for-bit against the `ascon` PyPI
+  reference implementation (itself an implementation of the Ascon v1.2
+  spec) for the round constants, S-box, and diffusion layer.
+- `test/test.py` (cocotb) verifies the full RTL against:
+  - Fixed known-answer vectors for the all-zero state under `p^12`,
+    `p^8`, and `p^6`.
+  - A non-trivial (IV-like) state under `p^12`.
+  - Single-round debug mode.
+  - Load/readback passthrough (no permutation run).
+  - 12 randomized vectors (3 per round count) cross-checked against a
+    self-contained from-spec Python reference embedded in the test file.
+- All of the above pass under Icarus Verilog + cocotb (`cd test && make`).
+
+## Area / tile budget
+
+The round function itself is small: five 64-bit XOR/AND/NOT networks for
+the S-box layer plus fixed-wiring rotations for diffusion — no multiplier,
+no memory array beyond the 320-bit state register and a 12-entry x 8-bit
+round-constant ROM. The dominant cost is the 320-bit state register itself
+plus the 40-byte serial load/unload control logic, which should comfortably
+fit a 1x1 tile on `ihp-sg13g2`.

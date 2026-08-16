@@ -1,0 +1,58 @@
+# Tiny Tapeout project information
+project:
+  title:        "Ascon Permutation Core"
+  author:       "Your Name"
+  discord:      ""
+  description:  "Byte-serial wrapper around the 320-bit Ascon permutation (p^12/p^8/p^6, plus single-round debug), the core primitive of the NIST-standard Ascon lightweight AEAD/hash algorithm."
+  language:     "Verilog"
+  clock_hz:     10000000
+
+  # How many tiles your design occupies (1x1, 1x2, 2x2, etc.)
+  tiles:        "1x1"
+
+  source_files:
+    - "project.v"
+    - "ascon_round.v"
+  top_module:   "tt_um_ascon_permutation"
+
+# Pinout: see the protocol description in src/project.v for full detail.
+pinout:
+  ui_in:
+    - "data_in[0]"
+    - "data_in[1]"
+    - "data_in[2]"
+    - "data_in[3]"
+    - "data_in[4]"
+    - "data_in[5]"
+    - "data_in[6]"
+    - "data_in[7]"
+  uo_out:
+    - "data_out[0]"
+    - "data_out[1]"
+    - "data_out[2]"
+    - "data_out[3]"
+    - "data_out[4]"
+    - "data_out[5]"
+    - "data_out[6]"
+    - "data_out[7]"
+  uio_in:
+    - "load_byte"
+    - "shift_out"
+    - "round_sel[0]"
+    - "round_sel[1]"
+    - "start"
+    - "rst_rdptr"
+    - ""
+    - ""
+  uio_out:
+    - "busy"
+    - "done"
+    - ""
+    - ""
+    - ""
+    - ""
+    - ""
+    - ""
+
+# Set to true if this project needs analog pins
+analog_pins: 0
