@@ -172,17 +172,6 @@ algebraically) — so Phase B (if still needed) still requires either a
 second buffer or the word-sequential accumulator approach described above,
 not this same trick.
 
-**Not yet known**: whether this fix (recovering the intended width=1
-S-box savings without the decoder tax) is enough to close the gap. If the next
-`gds.yaml` run still fails utilization, the next-cheapest lever is Phase B
-(serializing diffusion) — but the mux-based design explored for it only
-saves ~20% of the diffusion block's ~650 GE at large complexity/cycle cost
-(see the analysis kept below), so if width=1 isn't enough on its own,
-strongly consider re-measuring actual GE-per-block from the OpenLane area
-report first (real numbers, not hand estimates) before investing more
-engineering effort in diffusion, and weigh whether accepting 3 tiles is a
-better tradeoff than an increasingly complex/fragile datapath.
-
 What changed since Phase A:
 - `src/project.v`: `lane_idx` widened 3→6 bits (0..63), `lane_off` is now
   `lane_idx` directly (no `{lane_idx,3'b000}` byte-shift), S-box slice
@@ -191,3 +180,83 @@ What changed since Phase A:
   `ascon_sbox_slice` instantiated with `.WIDTH(1)`.
 - `src/ascon_round.v`: unchanged from Phase A (already parameterized by
   `WIDTH`, so no edits needed to shrink further).
+
+## Real hardening result after the rotate-and-inject fix
+
+Pushed and hardened again. Real ground truth from `28-openroad-globalplacement`:
+
+```
+[INFO GPL-0016] Core area:                   60109.258 um^2
+[INFO GPL-0019] Utilization:                    93.358 %
+[WARNING GPL-0302] Target density 0.8000 is too low for the available free area.
+Automatically adjusting to uniform density 0.9400.
+```
+
+**116% -> 93.36%** raw cell utilization — the rotate-and-inject fix was a
+huge win and confirms the earlier addressed-write decoder really was the
+regression's cause. Global placement, detailed placement, and CTS all
+completed. But 93.36% is still razor-thin: OpenROAD had to auto-bump its
+placement density target to 94% just to legalize the initial placement at
+all, leaving ~0 slack. The flow then failed later, in
+`37-openroad-resizertimingpostcts`: post-CTS hold-violation repair found
+348 endpoints and inserted 615 buffers (+18.8% area) to fix them, and
+detailed placement couldn't legalize 183 of those new cells (`DPL-0036`)
+because there was no room left.
+
+**Why so many hold violations**: this is a direct side effect of the
+rotate-and-inject S-box. Most of `state_flat`'s 320 bits, during the SBOX
+phase, do nothing but `bit[k] <= bit[k+1]` — near-zero logic delay between
+adjacent flops. After CTS introduces real clock skew across the physical
+layout, that near-zero data delay is exactly the classic hold-violation
+setup (skew can exceed the data path delay). This is a known tradeoff for
+shift-register-heavy designs (e.g. scan chains have the same issue) — the
+optimization that shrank the S-box is *also* what's now generating the
+hold-fix buffer bloat.
+
+**Two responses taken together**, since raw utilization has enough margin
+now (93.36% -> plenty of room if the post-CTS buffer bloat can be tamed)
+that a full re-architecture didn't seem justified before trying cheaper
+options:
+
+1. `src/config.json`: `CLOCK_PERIOD` was `20` (50 MHz) but the real target
+   per `info.yaml` (`clock_hz: 10000000`) is 10 MHz (100ns). Fixed to
+   `100`. Free, no RTL risk, gives the resizer much more setup slack
+   (though hold violations are period-independent in principle, so this
+   alone probably isn't sufficient — included mainly because it's
+   nearly-free to fix a genuine mismatch either way).
+2. **Diffusion now also bit-serialized**, using the *same* free-wiring
+   principle that worked for the S-box, but avoiding the earlier
+   decoder mistake entirely: diffusion needs 3 taps per output bit
+   (`sb[j] ^ sb[(j+r1)%64] ^ sb[(j+r2)%64]`), not 1, and those taps are
+   *not* all at position 0 — a single shared rotating register develops
+   wraparound corruption for the offset taps (verified this algebraically
+   earlier). The fix: process one word at a time. That word's `state_flat`
+   slice does a **pure rotate** (no injection — it self-restores to its
+   original value after 64 steps, verified in simulation), while 3 *fixed*
+   fixed bit positions (0, r1, r2 — all compile-time constants, selected
+   only by a small 5-way mux on `word_idx`) are read each cycle and their
+   XOR is shifted into one shared 64-bit accumulator (`diff_acc`, reused
+   across all 5 words sequentially, not one accumulator per word). After
+   64 cycles the accumulator holds the fully diffused word, written back
+   in 1 more cycle. Cost: **+64 flip-flops total** (not +320), and the
+   diffusion combinational logic drops from ~650 GE (fully parallel) to 2
+   XOR gates + three small 5-way muxes (reused for the whole pass).
+   Verified via literal simulation against the reference: 352/352 vectors
+   matched across all round counts, including an explicit self-restore
+   assertion on the source word after its 64 rotations.
+
+Latency cost: diffusion goes from 1 cycle/round to 5 words x 65 cycles =
+325 cycles/round. Round total: 64 (S-box) + 325 (diffusion) = 389
+cycles/round (was 65). A `p^12` permutation is now ~4.7k cycles (was
+~780) — still trivial for a non-realtime demonstrator chip at 10 MHz
+(~470 us).
+
+**Not yet known**: whether this closes the remaining gap (down from
+93.36% raw, now also removing most of the diffusion block) enough for
+post-CTS hold-fix buffers to legalize. If it's still failing at the same
+`DPL-0036` stage, the hold-violation-generation itself (not raw area) is
+the real remaining constraint, and the fix would need to target *why* so
+many near-zero-delay paths exist — e.g. deliberately routing the SBOX/DIFF
+rotate chains through the existing small combinational logic instead of a
+bare wire+mux, or accepting 4 tiles (`2x2`) as the practical answer for
+this architecture.

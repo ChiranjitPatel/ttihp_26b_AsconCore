@@ -6,16 +6,32 @@
 // A byte-serial wrapper around the 320-bit Ascon permutation (p^12 / p^8 /
 // p^6, plus a single-round debug mode), sized for a TinyTapeout tile.
 //
-// Each round is split into a bit-serial S-box phase (64 cycles, reusing one
-// 1-bit-wide instance of the S-box logic across all 64 bit positions of
-// each word) followed by one full-width diffusion phase. The S-box has no
-// dependency between bit positions, so bit-serializing it is bit-for-bit
-// equivalent to the fully parallel version; only the diffusion layer needs
-// a full word at once. This trades permutation latency (12 rounds x 65
-// cycles/round = 780 cycles for p^12, still small next to the I/O time
-// below) for a much smaller S-box, which was the largest single
-// contributor to tile area. (An earlier 8-bit-lane version wasn't enough
-// on its own to fit a 1x2 tile footprint — see knowledge.md.)
+// Both the S-box and the diffusion (linear) layer are bit-serialized to
+// keep combinational area minimal, at the cost of permutation latency
+// (still trivial next to the byte-serial I/O time, and next to nothing
+// for a non-realtime demonstrator chip). Each round:
+//   1. S-box phase (64 cycles): each word is a rotate-right-by-1-per-cycle
+//      shift register; the S-box has no dependency between bit positions,
+//      so reading/writing a fixed position (bit 0 in, bit 63 out) each
+//      cycle is bit-for-bit equivalent to computing it in one shot, with
+//      no address decoder needed anywhere.
+//   2. Diffusion phase (5 x 65 = 325 cycles): processes one word at a time.
+//      For 64 cycles, that word rotates (read-only, no injection this
+//      time) while a shared accumulator reads 3 *fixed* taps of the
+//      rotating word (bit 0, and the word's two constant rotation
+//      amounts) each cycle and shifts the XOR of them in — the same
+//      "rotate exposes every needed bit at a fixed physical position over
+//      time" trick as the S-box, just with 3 taps instead of 1. After 64
+//      cycles the accumulator holds the fully diffused word (proved
+//      algebraically and by direct simulation to match the reference
+//      rotr-based formula), which is written back in 1 more cycle. This
+//      needs only one extra 64-bit accumulator (reused across all 5
+//      words), not a second full 320-bit buffer.
+// 389 cycles/round total (64 + 325); a p^12 permutation is ~4.7k cycles.
+// (Two earlier, cheaper attempts are documented in knowledge.md: a
+// byte-lane S-box wasn't enough to fit a 1x2 tile, and a runtime-addressed
+// bit-serial S-box wasn't wired this way and cost more in write-decoder
+// area than it saved.)
 //
 // ---------------------------------------------------------------------------
 // Host protocol (all control bits live on uio_in / uio_out)
@@ -45,9 +61,9 @@
 //      least-significant byte of x4 last (big-endian, matches the Ascon
 //      spec's word layout State = x0 || x1 || x2 || x3 || x4).
 //   2. Set round_sel, pulse start for 1 cycle.
-//   3. Wait for busy to fall / done to pulse (65 clock cycles per round: 64
-//      S-box lanes + 1 diffusion cycle, x 12/8/6/1 rounds depending on
-//      round_sel).
+//   3. Wait for busy to fall / done to pulse (389 clock cycles per round: 64
+//      S-box lanes + 5 words x 65 diffusion cycles, x 12/8/6/1 rounds
+//      depending on round_sel).
 //   4. Pulse shift_out 40 times, reading uo_out after each pulse, to shift
 //      the resulting state out in the same big-endian byte order. The read
 //      pointer auto-resets to 0 when a permutation completes, and can also
@@ -99,15 +115,19 @@ module tt_um_ascon_permutation (
     endfunction
 
     // ---- FSM ----
-    localparam IDLE = 2'd0;
-    localparam SBOX = 2'd1;  // bit-serial S-box: 64 cycles, 1 bit/word/cycle
-    localparam DIFF = 2'd2;  // one full-width diffusion cycle
+    localparam IDLE     = 2'd0;
+    localparam SBOX     = 2'd1;  // bit-serial S-box: 64 cycles, 1 bit/word/cycle
+    localparam DIFF_ROT = 2'd2;  // diffuse one word: 64 rotate+accumulate cycles
+    localparam DIFF_WB  = 2'd3;  // write that word's diffused result back, 1 cycle
 
-    reg [1:0] fsm_state;
-    reg [3:0] r_idx;        // index into round-constant table, 0..11
-    reg [3:0] rounds_left;  // rounds remaining in current run
-    reg       done_pulse;
-    reg [5:0] lane_idx;     // which bit lane (0..63) of the current round's S-box
+    reg [1:0]  fsm_state;
+    reg [3:0]  r_idx;        // index into round-constant table, 0..11
+    reg [3:0]  rounds_left;  // rounds remaining in current run
+    reg        done_pulse;
+    reg [5:0]  lane_idx;     // sub-cycle counter (0..63): S-box bit lane, or
+                              // diffusion rotate step within the active word
+    reg [2:0]  word_idx;     // which word (0..4) diffusion is currently on
+    reg [63:0] diff_acc;     // shared accumulator, reused across all 5 words
 
     // ---- word views of the state register ----
     wire [63:0] x0_cur = state_flat[319:256];
@@ -148,21 +168,27 @@ module tt_um_ascon_permutation (
         .y4_o (y4_slice)
     );
 
-    // ---- diffusion: full width, run once per round after all 64 S-box lanes ----
-    wire [63:0] x0_nxt, x1_nxt, x2_nxt, x3_nxt, x4_nxt;
+    // ---- diffusion: 3 fixed taps (bit 0, and the word's two constant
+    // rotation amounts) of whichever word is currently rotating, selected
+    // by a small 5-way mux on word_idx — all the tap positions themselves
+    // are compile-time constants, so this costs nothing like the 64-way
+    // decoder that would be needed for a runtime-addressed version.
+    wire diff_tap0 = (word_idx == 3'd0) ? x0_cur[0] :
+                      (word_idx == 3'd1) ? x1_cur[0] :
+                      (word_idx == 3'd2) ? x2_cur[0] :
+                      (word_idx == 3'd3) ? x3_cur[0] : x4_cur[0];
 
-    ascon_diffusion u_diffusion (
-        .sb0_i (x0_cur),
-        .sb1_i (x1_cur),
-        .sb2_i (x2_cur),
-        .sb3_i (x3_cur),
-        .sb4_i (x4_cur),
-        .x0_o  (x0_nxt),
-        .x1_o  (x1_nxt),
-        .x2_o  (x2_nxt),
-        .x3_o  (x3_nxt),
-        .x4_o  (x4_nxt)
-    );
+    wire diff_tap1 = (word_idx == 3'd0) ? x0_cur[19] :
+                      (word_idx == 3'd1) ? x1_cur[61] :
+                      (word_idx == 3'd2) ? x2_cur[1]  :
+                      (word_idx == 3'd3) ? x3_cur[10] : x4_cur[7];
+
+    wire diff_tap2 = (word_idx == 3'd0) ? x0_cur[28] :
+                      (word_idx == 3'd1) ? x1_cur[39] :
+                      (word_idx == 3'd2) ? x2_cur[6]  :
+                      (word_idx == 3'd3) ? x3_cur[17] : x4_cur[41];
+
+    wire diff_bit = diff_tap0 ^ diff_tap1 ^ diff_tap2;
 
     always @(posedge clk) begin
         if (!rst_n) begin
@@ -173,6 +199,8 @@ module tt_um_ascon_permutation (
             rounds_left <= 4'd0;
             done_pulse  <= 1'b0;
             lane_idx    <= 6'd0;
+            word_idx    <= 3'd0;
+            diff_acc    <= 64'd0;
         end else if (ena) begin
             done_pulse <= 1'b0;
 
@@ -217,27 +245,64 @@ module tt_um_ascon_permutation (
                     state_flat[63:0]    <= {y4_slice, state_flat[63:1]};
 
                     if (lane_idx == 6'd63) begin
-                        fsm_state <= DIFF;
+                        fsm_state <= DIFF_ROT;
+                        word_idx  <= 3'd0;
+                        lane_idx  <= 6'd0;
                     end else begin
                         lane_idx <= lane_idx + 6'd1;
                     end
                 end
 
-                DIFF: begin
-                    state_flat <= {x0_nxt, x1_nxt, x2_nxt, x3_nxt, x4_nxt};
-                    r_idx      <= r_idx + 4'd1;
-                    lane_idx   <= 6'd0;
+                DIFF_ROT: begin
+                    // rotate only the word currently being diffused (pure
+                    // wiring, no injection this time — it self-restores to
+                    // its original value after 64 steps); meanwhile shift
+                    // this cycle's tap XOR into the shared accumulator
+                    case (word_idx)
+                        3'd0: state_flat[319:256] <= {x0_cur[0], x0_cur[63:1]};
+                        3'd1: state_flat[255:192] <= {x1_cur[0], x1_cur[63:1]};
+                        3'd2: state_flat[191:128] <= {x2_cur[0], x2_cur[63:1]};
+                        3'd3: state_flat[127:64]  <= {x3_cur[0], x3_cur[63:1]};
+                        default: state_flat[63:0] <= {x4_cur[0], x4_cur[63:1]};
+                    endcase
 
-                    if (rounds_left == 4'd1) begin
-                        fsm_state  <= IDLE;
-                        done_pulse <= 1'b1;
+                    diff_acc <= {diff_bit, diff_acc[63:1]};
+
+                    if (lane_idx == 6'd63) begin
+                        fsm_state <= DIFF_WB;
                     end else begin
-                        fsm_state <= SBOX;
+                        lane_idx <= lane_idx + 6'd1;
                     end
-                    rounds_left <= rounds_left - 4'd1;
                 end
 
-                default: fsm_state <= IDLE;
+                DIFF_WB: begin
+                    case (word_idx)
+                        3'd0: state_flat[319:256] <= diff_acc;
+                        3'd1: state_flat[255:192] <= diff_acc;
+                        3'd2: state_flat[191:128] <= diff_acc;
+                        3'd3: state_flat[127:64]  <= diff_acc;
+                        default: state_flat[63:0] <= diff_acc;
+                    endcase
+
+                    lane_idx <= 6'd0;
+
+                    if (word_idx == 3'd4) begin
+                        // all 5 words diffused: this round is done
+                        r_idx    <= r_idx + 4'd1;
+                        word_idx <= 3'd0;
+
+                        if (rounds_left == 4'd1) begin
+                            fsm_state  <= IDLE;
+                            done_pulse <= 1'b1;
+                        end else begin
+                            fsm_state <= SBOX;
+                        end
+                        rounds_left <= rounds_left - 4'd1;
+                    end else begin
+                        word_idx  <= word_idx + 3'd1;
+                        fsm_state <= DIFF_ROT;
+                    end
+                end
             endcase
         end
     end
