@@ -116,18 +116,22 @@ module tt_um_ascon_permutation (
     wire [63:0] x3_cur = state_flat[127:64];
     wire [63:0] x4_cur = state_flat[63:0];
 
-    // ---- S-box: one bit lane at a time, reused across the round ----
-    wire [5:0] lane_off = lane_idx;  // 0..63
-
+    // ---- S-box: bit 0 of each word, reused across the round ----
+    // Each word is treated as a rotate-right-by-1-per-cycle shift register
+    // during the SBOX phase (see the SBOX case below), so the "current
+    // lane" is always at the same fixed position (bit 0) — no runtime
+    // address/decoder needed, unlike indexing state_flat at a
+    // lane-counter-derived offset (which was tried first and costs a
+    // 64-way decoder + a compare/mux per flop, more than it saved).
     wire [7:0] rc_cur = round_const(r_idx);
-    wire       rc_bit = rc_cur[lane_off[2:0]];
+    wire       rc_bit = rc_cur[lane_idx[2:0]];
 
-    wire c0_slice = x0_cur[lane_off];
-    wire c1_slice = x1_cur[lane_off];
+    wire c0_slice = x0_cur[0];
+    wire c1_slice = x1_cur[0];
     // round constant only touches byte 0 (bits 7:0) of x2
-    wire c2_slice = x2_cur[lane_off] ^ ((lane_off < 6'd8) ? rc_bit : 1'b0);
-    wire c3_slice = x3_cur[lane_off];
-    wire c4_slice = x4_cur[lane_off];
+    wire c2_slice = x2_cur[0] ^ ((lane_idx < 6'd8) ? rc_bit : 1'b0);
+    wire c3_slice = x3_cur[0];
+    wire c4_slice = x4_cur[0];
 
     wire y0_slice, y1_slice, y2_slice, y3_slice, y4_slice;
 
@@ -201,13 +205,16 @@ module tt_um_ascon_permutation (
                 end
 
                 SBOX: begin
-                    // in-place update: each lane only ever reads/writes its
-                    // own bit position, so this is safe to do incrementally
-                    state_flat[256 + lane_off] <= y0_slice;
-                    state_flat[192 + lane_off] <= y1_slice;
-                    state_flat[128 + lane_off] <= y2_slice;
-                    state_flat[64  + lane_off] <= y3_slice;
-                    state_flat[0   + lane_off] <= y4_slice;
+                    // rotate each word right by 1 (pure wiring, like rotr)
+                    // and inject the freshly computed S-box bit at the top
+                    // instead of the bit that would naturally rotate in —
+                    // no address decoder needed, just a fixed-position
+                    // read (bit 0) and a fixed-position write (bit 63)
+                    state_flat[319:256] <= {y0_slice, state_flat[319:257]};
+                    state_flat[255:192] <= {y1_slice, state_flat[255:193]};
+                    state_flat[191:128] <= {y2_slice, state_flat[191:129]};
+                    state_flat[127:64]  <= {y3_slice, state_flat[127:65]};
+                    state_flat[63:0]    <= {y4_slice, state_flat[63:1]};
 
                     if (lane_idx == 6'd63) begin
                         fsm_state <= DIFF;

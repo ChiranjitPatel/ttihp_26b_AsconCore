@@ -140,7 +140,40 @@ Worth remembering for any future serialization work in this file: avoid
 indexing expressions directly off a function call's result; always go
 through a wire first.
 
-**Not yet known**: whether width=1 alone closes the 13.67% gap. If the next
+**Regression found and fixed**: the width=1 push (after fixing the yosys
+syntax error) actually made things *worse* — utilization went from 113.67%
+to **116%**. Root cause: `state_flat[256 + lane_off] <= y0_slice;` writes
+to a *runtime-computed* bit index, which forces the synthesizer to build a
+decoder + a compare/mux on every one of the 320 flip-flops to decide
+whether `lane_off` currently points at them. At width=8 that only needed
+an 8-way decode (3 bits); narrowing to width=1 turned it into a 64-way
+decode (6 bits) — the decode overhead almost certainly outgrew the savings
+from shrinking the S-box itself.
+
+Fixed by dropping addressed writes entirely: since the S-box needs no
+cross-bit-position data, each word is now a genuine **rotate-and-inject
+shift register** during the SBOX phase — `state_flat[319:256] <= {y0_slice,
+state_flat[319:257]}` etc. Every cycle rotates the word right by 1 (pure
+wiring, identical in cost to `rotr` — zero gates) except the top bit, which
+takes the freshly computed S-box output instead of the bit that would have
+naturally rotated in. Reading is always at a fixed position (bit 0) too, so
+there's no decoder or per-flop comparator anywhere. Proved mathematically
+and confirmed by literal simulation (not just the earlier logical-
+equivalence check) that this produces the bit-for-bit identical final state
+after 64 steps as the addressed-write version — 264/264 vectors matched,
+including a direct rotate-vs-addressed-vs-reference cross-check.
+
+Note this rotate trick only works for the S-box because it has zero
+dependency between bit positions (every tap is "my own bit, position 0").
+Diffusion's `rotr(sb, r1)`/`rotr(sb, r2)` taps are *not* at position 0, and
+a single shared rotating register develops wraparound corruption for those
+offset taps once enough cycles have passed (verified this fails
+algebraically) — so Phase B (if still needed) still requires either a
+second buffer or the word-sequential accumulator approach described above,
+not this same trick.
+
+**Not yet known**: whether this fix (recovering the intended width=1
+S-box savings without the decoder tax) is enough to close the gap. If the next
 `gds.yaml` run still fails utilization, the next-cheapest lever is Phase B
 (serializing diffusion) — but the mux-based design explored for it only
 saves ~20% of the diffusion block's ~650 GE at large complexity/cycle cost
