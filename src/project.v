@@ -119,7 +119,8 @@ module tt_um_ascon_permutation (
     // ---- S-box: one bit lane at a time, reused across the round ----
     wire [5:0] lane_off = lane_idx;  // 0..63
 
-    wire rc_bit = round_const(r_idx)[lane_off[2:0]];
+    wire [7:0] rc_cur = round_const(r_idx);
+    wire       rc_bit = rc_cur[lane_off[2:0]];
 
     wire c0_slice = x0_cur[lane_off];
     wire c1_slice = x1_cur[lane_off];

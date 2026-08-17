@@ -127,6 +127,19 @@ environment, so the real `test/test.py` suite still needs to run in CI to
 confirm (unchanged from before — it polls `busy` rather than assuming a
 fixed cycle count, so no test changes are needed for the new timing).
 
+**Yosys syntax gap found by CI**: the first width=1 push failed synthesis
+(not placement) — `round_const(r_idx)[lane_off[2:0]]` (bit-selecting a
+function call's return value directly) is rejected by yosys's Verilog
+frontend (`syntax error, unexpected '['`), even though Icarus Verilog
+accepts it. This is exactly the kind of tool-specific syntax gap the local
+Python-model verification in this environment *cannot* catch, since it
+only checks logical equivalence, not real Verilog parsing — there's no
+local yosys/iverilog here to compile against. Fixed by binding the
+function result to an intermediate wire (`rc_cur`) before indexing it.
+Worth remembering for any future serialization work in this file: avoid
+indexing expressions directly off a function call's result; always go
+through a wire first.
+
 **Not yet known**: whether width=1 alone closes the 13.67% gap. If the next
 `gds.yaml` run still fails utilization, the next-cheapest lever is Phase B
 (serializing diffusion) — but the mux-based design explored for it only
