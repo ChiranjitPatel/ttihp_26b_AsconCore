@@ -251,12 +251,62 @@ cycles/round (was 65). A `p^12` permutation is now ~4.7k cycles (was
 ~780) — still trivial for a non-realtime demonstrator chip at 10 MHz
 (~470 us).
 
-**Not yet known**: whether this closes the remaining gap (down from
-93.36% raw, now also removing most of the diffusion block) enough for
-post-CTS hold-fix buffers to legalize. If it's still failing at the same
-`DPL-0036` stage, the hold-violation-generation itself (not raw area) is
-the real remaining constraint, and the fix would need to target *why* so
-many near-zero-delay paths exist — e.g. deliberately routing the SBOX/DIFF
-rotate chains through the existing small combinational logic instead of a
-bare wire+mux, or accepting 4 tiles (`2x2`) as the practical answer for
-this architecture.
+## Real hardening result after diffusion serialization + CLOCK_PERIOD fix
+
+Pushed and hardened again. Real ground truth from `28-openroad-globalplacement`:
+
+```
+[INFO GPL-0019] Utilization:                    81.350 %
+[WARNING GPL-0302] Target density 0.8000 is too low for the available free area.
+Automatically adjusting to uniform density 0.8200.
+```
+
+**93.36% -> 81.35%** raw utilization — diffusion serialization worked as
+predicted, and the design now has real (not razor-thin) placement margin;
+density only needed a tiny auto-bump (80% -> 82%) versus the previous
+huge jump (80% -> 94%).
+
+Still failed at the same stage though (`37-openroad-resizertimingpostcts`,
+`DPL-0036`), but with much better numbers:
+
+| | Before (93.36% raw) | After (81.35% raw) |
+|---|---|---|
+| Hold-violation endpoints found | 348 | 414 |
+| Hold buffers inserted | 615 (+18.8% area) | 679 (+23.2% area) |
+| Instances that failed to legalize | 183 | **51** |
+
+Two things worth noting:
+- **More hold violations after diffusion serialization, not fewer.** This
+  confirms the earlier hypothesis: the word-sequential diffusion rotate
+  (`state_flat[wordslice] <= {tap0, wordslice[63:1]}`, pure wiring) is
+  *another* near-zero-delay shift structure, same failure mode as the
+  S-box rotate. Serializing more of the datapath this way keeps adding
+  more such paths even as it shrinks combinational area — the two effects
+  pull in opposite directions for hold-violation count specifically, even
+  though they still net out to less total area and far fewer unlegalizable
+  instances (183 -> 51) because of the much larger placement margin.
+- The final hold-repair iteration overshot to **+0.102ns positive slack**
+  against a requested `hold_margin` of only 0.1ns — buffer-size granularity
+  means the repair can't land exactly on the margin, so some of those 679
+  buffers are larger/more numerous than strictly required.
+
+**Response**: `src/config.json`'s `PL_RESIZER_HOLD_SLACK_MARGIN` (0.1 ->
+0.05) and `GRT_RESIZER_HOLD_SLACK_MARGIN` (0.05 -> 0.025) halved. This is
+exactly the config file's own documented purpose for these two variables
+("increase in case of hold violations" implies decrease when over-fixing),
+and directly targets the observed overshoot — fewer/smaller buffers needed
+to clear a smaller required margin. This is a config-only change with no
+RTL risk, but it is a real (if modest) reduction in hold-timing safety
+margin against process/voltage/temperature variation on actual silicon;
+0.05ns / 0.025ns are still non-trivial cushions for this process, not zero.
+
+**Not yet known**: whether the margin reduction is enough to clear the
+remaining 51-instance gap. If it's still failing at the same stage after
+this, the config lever is probably exhausted and the next options are (a)
+further RTL area reduction to widen placement margin further (only the
+320-bit register + minor control logic remain, both hard to shrink further
+without changing the I/O protocol or genuinely new tricks), or (b)
+accepting 4 tiles (`2x2`) as the practical answer for this architecture —
+worth weighing against further engineering effort at that point, since
+returns are visibly diminishing (large effort for the S-box/diffusion work
+already spent, most of the "easy" area is gone).
